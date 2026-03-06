@@ -1,46 +1,155 @@
+# =========================================================
+# Usage notes
+# =========================================================
+# 1) Train on original DeepMag dataset from scratch:
+#    self.dataset_name = 'deepmag'
+#    self.finetune = False
+#    self.max_samples = None
+#
+# 2) Finetune on Kubric dataset:
+#    self.dataset_name = 'kubric'
+#    self.finetune = True
+#    self.max_samples = None
+#
+# 3) Quick debug with a small subset:
+#    self.max_samples = 200
+#
+# Notes:
+# - max_samples=None means using all samples listed in train_mf.txt
+# - sample count is inferred automatically from train_mf.txt
+# - save_dir is generated automatically based on dataset_name and finetune
+# =========================================================
+
+
 import os
 import time
+import json
+import math
 import numpy as np
+
+from skimage.metrics import mean_squared_error as compare_mse
+from sklearn.metrics import mean_absolute_error as compare_mae
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
+from cmath import sqrt
+
 
 class Config(object):
     def __init__(self):
+        
+        # -----------------------------
+        # W&B
+        # -----------------------------
+        self.wandb_project = 'Magnification'
+        self.wandb_entity = 'yandashao'          # 你的 team / username，没有就 None
+        self.wandb_mode = 'online'        # 'online', 'offline', 'disabled'
+        
+        
+        # =========================================================
+        # 1) High-level switches: only change these in daily use
+        # =========================================================
+        # options: 'deepmag', 'kubric'
+        self.dataset_name = 'kubric'
 
-        # General
-        self.epochs = 100        # 向前和向后传播中所有批次的单次训练迭代
-        self.batch_size = 12   # 4
-        self.date = 'FD4MM'      # FoCR
-        self.numdata = 100000  # 100000
-        self.workers = 16  # 32
-        # Data
-        self.test_batch_size = 1   # 一次训练所选取的样本数
-        self.test_workers = 16
-        self.numtestdata = 600  # 100000
-        # Data
-        self.data_dir = './datasets'
-        self.dir_train = os.path.join(self.data_dir, 'train')
-        # Setting
-        self.frames_train = 'coco100000'        # you can adapt 100000 to a smaller number to train
-        self.cursor_end = int(self.frames_train.split('coco')[-1])  #将字符串以'coco'开割形成一个字符串数组，然后再通过索引[-1]取出所得数组中的第一个元素的值
-        self.coco_amp_lst = np.loadtxt(os.path.join(self.dir_train, 'train_mf.txt'))[:self.cursor_end]
+        # False: train from scratch on selected dataset
+        # True : load pretrained weights and finetune on selected dataset
+        self.finetune = True
+
+        # Optional: limit sample count for quick debugging
+        # None means use all samples found in train_mf.txt
+        self.max_samples = None
+
+        # =========================================================
+        # 2) General training settings
+        # =========================================================
+        self.epochs = 100
+        self.batch_size = 40
+        self.workers = 2
+
+        self.test_batch_size = 1
+        self.batch_size_test = self.test_batch_size
+
+        self.test_workers = 4
+        self.workers_test = self.test_workers
+        self.numtestdata = 600
+
+        self.lr = 1e-4
+        self.betas = (0.9, 0.999)
+        self.weight_decay = 0.0
+        self.preproc = ['resize', 'gaussian']
+        self.load_all = False
         self.videos_train = []
-        self.load_all = False        # Don't turn it on, unless you have such a big mem.
-                                     # On coco dataset, 100, 000 sets -> 850G
-        # Training
-        self.lr = 1e-4               # 学习率
-        self.betas = (0.9, 0.999)    # 用于计算梯度以及梯度平方的运行平均值的系数
-        self.weight_decay=0.0
-        self.batch_size_test = 1     # 测试训练的所选取的样本数
-        self.preproc = ['poisson']   # ['poisson','resize', ]
-        self.pretrained_weights = ''
 
-        # Callbacks
-        self.num_val_per_epoch = 1000  # 每多少print一下  x / all_num中的x
-        self.save_dir = 'weights_date{}'.format(self.date)
+        # =========================================================
+        # 3) Data roots
+        # =========================================================
+        self.data_dir = '/data/curtin_cumlg/curtin_yanda/work/datasets/'
+
+        self.dataset_roots = {
+            'deepmag': os.path.join(self.data_dir, 'train'),
+            'kubric': os.path.join(self.data_dir, 'Kubric_vmm_train'),
+        }
+
+        if self.dataset_name not in self.dataset_roots:
+            raise ValueError(
+                f"Unknown dataset_name: {self.dataset_name}. "
+                f"Supported: {list(self.dataset_roots.keys())}"
+            )
+
+        self.dir_train = self.dataset_roots[self.dataset_name]
+
+        # =========================================================
+        # 4) Pretrained weights
+        # =========================================================
+        self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM_kubric_ft/magnet_epoch65_loss3.91e-01.pth'
+        if self.finetune:
+            self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM_kubric_ft/magnet_epoch65_loss3.91e-01.pth'
+            #self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM/magnet_epoch4_loss4.99e-01.pth'
+
+        # =========================================================
+        # 5) Auto-discover training metadata from train_mf.txt
+        # =========================================================
+        self.mf_path = os.path.join(self.dir_train, 'train_mf.txt')
+        if not os.path.exists(self.mf_path):
+            raise FileNotFoundError(f"train_mf.txt not found: {self.mf_path}")
+
+        self.coco_amp_lst = np.loadtxt(self.mf_path)
+
+        # np.loadtxt returns scalar if file has only one number
+        if np.ndim(self.coco_amp_lst) == 0:
+            self.coco_amp_lst = np.array([float(self.coco_amp_lst)])
+
+        if self.max_samples is not None:
+            self.coco_amp_lst = self.coco_amp_lst[:self.max_samples]
+
+        self.numdata = len(self.coco_amp_lst)
+        self.frames_train = f'coco{self.numdata}'
+        self.cursor_end = self.numdata
+
+        # =========================================================
+        # 6) Save / logging names
+        # =========================================================
+        if self.finetune:
+            self.date = f'FD4MM_{self.dataset_name}_ft'
+        else:
+            self.date = f'FD4MM_{self.dataset_name}'
+
+        self.save_dir = f'weights_date{self.date}'
+        self.wandb_run_name = self.save_dir
         self.time_st = time.time()
         self.losses = []
-        #### amp test
-        ##################
 
+        self.num_val_per_epoch = 1000
+
+        # =========================================================
+        # 7) Dataset sanity check
+        # =========================================================
+        self._check_train_dataset()
+
+        # =========================================================
+        # 8) Keep your original evaluation/test paths
+        # =========================================================
+        # amp test
         self.dir_amp0 = os.path.join(self.data_dir, 'systest/amp0/000000')
         self.dir_amp1 = os.path.join(self.data_dir, 'systest/amp0/000001')
         self.dir_amp2 = os.path.join(self.data_dir, 'systest/amp0/000002')
@@ -51,7 +160,7 @@ class Config(object):
         self.dir_amp7 = os.path.join(self.data_dir, 'systest/amp0/000007')
         self.dir_amp8 = os.path.join(self.data_dir, 'systest/amp0/000008')
         self.dir_amp9 = os.path.join(self.data_dir, 'systest/amp0/000009')
-        #####5amp
+
         self.dir_5amp0 = os.path.join(self.data_dir, 'systest/amp5/000000')
         self.dir_5amp1 = os.path.join(self.data_dir, 'systest/amp5/000001')
         self.dir_5amp2 = os.path.join(self.data_dir, 'systest/amp5/000002')
@@ -62,7 +171,7 @@ class Config(object):
         self.dir_5amp7 = os.path.join(self.data_dir, 'systest/amp5/000007')
         self.dir_5amp8 = os.path.join(self.data_dir, 'systest/amp5/000008')
         self.dir_5amp9 = os.path.join(self.data_dir, 'systest/amp5/000009')
-        ####10amp
+
         self.dir_10amp0 = os.path.join(self.data_dir, 'systest/amp10/000000')
         self.dir_10amp1 = os.path.join(self.data_dir, 'systest/amp10/000001')
         self.dir_10amp2 = os.path.join(self.data_dir, 'systest/amp10/000002')
@@ -73,7 +182,7 @@ class Config(object):
         self.dir_10amp7 = os.path.join(self.data_dir, 'systest/amp10/000007')
         self.dir_10amp8 = os.path.join(self.data_dir, 'systest/amp10/000008')
         self.dir_10amp9 = os.path.join(self.data_dir, 'systest/amp10/000009')
-        ####20amp
+
         self.dir_20amp0 = os.path.join(self.data_dir, 'systest/amp20/000000')
         self.dir_20amp1 = os.path.join(self.data_dir, 'systest/amp20/000001')
         self.dir_20amp2 = os.path.join(self.data_dir, 'systest/amp20/000002')
@@ -84,7 +193,7 @@ class Config(object):
         self.dir_20amp7 = os.path.join(self.data_dir, 'systest/amp20/000007')
         self.dir_20amp8 = os.path.join(self.data_dir, 'systest/amp20/000008')
         self.dir_20amp9 = os.path.join(self.data_dir, 'systest/amp20/000009')
-        ####50amp
+
         self.dir_50amp0 = os.path.join(self.data_dir, 'systest/amp50/000000')
         self.dir_50amp1 = os.path.join(self.data_dir, 'systest/amp50/000001')
         self.dir_50amp2 = os.path.join(self.data_dir, 'systest/amp50/000002')
@@ -95,7 +204,7 @@ class Config(object):
         self.dir_50amp7 = os.path.join(self.data_dir, 'systest/amp50/000007')
         self.dir_50amp8 = os.path.join(self.data_dir, 'systest/amp50/000008')
         self.dir_50amp9 = os.path.join(self.data_dir, 'systest/amp50/000009')
-        ####100amp
+
         self.dir_100amp0 = os.path.join(self.data_dir, 'systest/amp100/000000')
         self.dir_100amp1 = os.path.join(self.data_dir, 'systest/amp100/000001')
         self.dir_100amp2 = os.path.join(self.data_dir, 'systest/amp100/000002')
@@ -106,7 +215,7 @@ class Config(object):
         self.dir_100amp7 = os.path.join(self.data_dir, 'systest/amp100/000007')
         self.dir_100amp8 = os.path.join(self.data_dir, 'systest/amp100/000008')
         self.dir_100amp9 = os.path.join(self.data_dir, 'systest/amp100/000009')
-        ########
+
         self.dir_001noise0 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.01/000000')
         self.dir_001noise1 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.01/000001')
         self.dir_001noise2 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.01/000002')
@@ -117,7 +226,7 @@ class Config(object):
         self.dir_001noise7 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.01/000007')
         self.dir_001noise8 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.01/000008')
         self.dir_001noise9 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.01/000009')
-        ########
+
         self.dir_005noise0 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.05/000000')
         self.dir_005noise1 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.05/000001')
         self.dir_005noise2 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.05/000002')
@@ -128,8 +237,7 @@ class Config(object):
         self.dir_005noise7 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.05/000007')
         self.dir_005noise8 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.05/000008')
         self.dir_005noise9 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.05/000009')
-        ############
-        ########
+
         self.dir_01noise0 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.1/000000')
         self.dir_01noise1 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.1/000001')
         self.dir_01noise2 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.1/000002')
@@ -140,8 +248,7 @@ class Config(object):
         self.dir_01noise7 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.1/000007')
         self.dir_01noise8 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.1/000008')
         self.dir_01noise9 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.1/000009')
-        ############
-        ########
+
         self.dir_02noise0 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.2/000000')
         self.dir_02noise1 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.2/000001')
         self.dir_02noise2 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.2/000002')
@@ -152,8 +259,7 @@ class Config(object):
         self.dir_02noise7 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.2/000007')
         self.dir_02noise8 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.2/000008')
         self.dir_02noise9 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.2/000009')
-        ############
-        ########
+
         self.dir_05noise0 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.5/000000')
         self.dir_05noise1 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.5/000001')
         self.dir_05noise2 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.5/000002')
@@ -164,9 +270,34 @@ class Config(object):
         self.dir_05noise7 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.5/000007')
         self.dir_05noise8 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.5/000008')
         self.dir_05noise9 = os.path.join(self.data_dir, 'noise_sysamp20/noise0.5/000009')
-        ############
 
         self.dir_baby = os.path.join(self.data_dir, 'train/train_vid_frames/val_baby')
+        self.dir_crane_crop = os.path.join(self.data_dir, 'train/train_vid_frames/val_crane_crop')
+
+    def _check_train_dataset(self):
+        required_dirs = ['frameA', 'frameB', 'amplified']
+        counts = {}
+
+        for d in required_dirs:
+            p = os.path.join(self.dir_train, d)
+            if not os.path.isdir(p):
+                raise FileNotFoundError(f'Required folder not found: {p}')
+            counts[d] = len([x for x in os.listdir(p) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
+
+        n_mf = len(self.coco_amp_lst)
+
+        print(f'[Config] dataset_name: {self.dataset_name}')
+        print(f'[Config] dir_train: {self.dir_train}')
+        print(f'[Config] frameA: {counts["frameA"]}, frameB: {counts["frameB"]}, amplified: {counts["amplified"]}, mf: {n_mf}')
+
+        if not (counts['frameA'] == counts['frameB'] == counts['amplified'] == n_mf):
+            raise ValueError(
+                'Dataset size mismatch: '
+                f'frameA={counts["frameA"]}, '
+                f'frameB={counts["frameB"]}, '
+                f'amplified={counts["amplified"]}, '
+                f'train_mf={n_mf}'
+            )
 
 
 
