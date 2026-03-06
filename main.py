@@ -13,6 +13,7 @@ import torch.backends.cudnn as cudnn
 from config import Config
 # from models.magnet_FD4MM import MagNet
 from magnet_FD4MM import MagNet
+import wandb
 
 from callbacks import save_model, gen_state_dict
 import random
@@ -25,6 +26,21 @@ from utils.utils import ContrastLoss_Ori, EdgeLoss, CharbonnierLoss
 losses = []
 def main():
     config = Config()
+    wandb.init(
+        project=config.wandb_project,
+        entity=config.wandb_entity,
+        mode=config.wandb_mode,
+        name=config.wandb_run_name,
+        config={
+            "dataset": config.dataset_name,
+            "epochs": config.epochs,
+            "batch_size": config.batch_size,
+            "lr": config.lr,
+            "workers": config.workers,
+            "numdata": config.numdata
+        }
+    )
+    
     seed = 1234
     random.seed(seed)
     np.random.seed(seed)
@@ -60,7 +76,7 @@ def main():
 
     # Data generator
     dataset_mag = ImageFromFolder(
-        config.dir_train, num_data=config.numdata, preprocessing=True)
+        config.dir_train, num_data=config.numdata, preprocessing=config.preproc)
     data_loader = data.DataLoader(dataset_mag,
                                   batch_size=config.batch_size,
                                   shuffle=True,
@@ -118,7 +134,18 @@ def train(loader, model, criterion_char,criterion_edge,criterion_cr, optimizer, 
 
         # Compute output
         mag_factor = mag_factor.unsqueeze(1).unsqueeze(1).unsqueeze(1)
-        y_hat = model(xa, xb, mag_factor, mode='train')
+        '''
+        print('xa shape:', xa.shape)
+        print('xb shape:', xb.shape)
+        print('y shape :', y.shape)
+        print('mag shape:', mag_factor.shape)
+        print('xa min/max:', xa.min().item(), xa.max().item())
+        print('xb min/max:', xb.min().item(), xb.max().item())
+        print('y  min/max:', y.min().item(), y.max().item())
+        
+        '''
+
+        y_hat = model(xa, xb, mag_factor, 'train')
 
         # Compute losses
         loss_recon = criterion_char(y_hat, y)
@@ -128,9 +155,18 @@ def train(loader, model, criterion_char,criterion_edge,criterion_cr, optimizer, 
         loss = loss_recon + loss_Edge + loss_CR
         losses.update(loss.item())
         losses_recon.update(loss_recon.item())
-        # losses_FFL.update(loss_FFL.item())
         losses_Edge.update(loss_Edge.item())
         losses_CR.update(loss_CR.item())
+
+        if i % 10 == 0:
+            wandb.log({
+                "train/loss": loss.item(),
+                "train/loss_recon": loss_recon.item(),
+                "train/loss_edge": loss_Edge.item(),
+                "train/loss_CR": loss_CR.item(),
+                "epoch": epoch,
+                "iter": i
+            })
 
         # Update model
         optimizer.zero_grad()
