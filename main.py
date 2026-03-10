@@ -41,7 +41,7 @@ def main():
         }
     )
     
-    seed = 1234
+    seed = 42
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -60,7 +60,7 @@ def main():
 
     magnet.to(device)
     print("using device{}".format(device))
-    print(magnet)  # 打印网络结构
+   # print(magnet)  # 打印网络结构
 
     # Metrics
     criterion_char = CharbonnierLoss().cuda()
@@ -70,6 +70,14 @@ def main():
     optimizer = optim.Adam(magnet.parameters(), lr=config.lr,
                                  betas=config.betas,
                                  weight_decay=config.weight_decay)
+    
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config.epochs,
+        eta_min=1e-6
+    )
+
+    
     if not os.path.exists(config.save_dir):
         os.makedirs(config.save_dir)
     print('Save_dir:', config.save_dir)
@@ -101,6 +109,11 @@ def main():
     for epoch in range(start_epoch, config.epochs):
         loss, loss_recon, loss_Edge, loss_CR = train(
             data_loader, magnet, criterion_char,criterion_edge,criterion_cr, optimizer, epoch, device, config)
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch {epoch}: lr = {current_lr:.8f}')
+        wandb.log({"lr": current_lr, "epoch": epoch})
+        
+        scheduler.step()
 
         # Stack losses
         losses.append(loss)
@@ -125,7 +138,7 @@ def train(loader, model, criterion_char,criterion_edge,criterion_cr, optimizer, 
 
     end = time.time()
     for i, (y, xa, xb, mag_factor) in enumerate(loader):
-        y = y.cuda()
+        y = y.to(device)
         xa = xa.to(device)
         xb = xb.to(device)
         # xc = xc.to(device)
@@ -150,7 +163,7 @@ def train(loader, model, criterion_char,criterion_edge,criterion_cr, optimizer, 
         # Compute losses
         loss_recon = criterion_char(y_hat, y)
         loss_Edge =  criterion_edge(y_hat, y)
-        loss_CR =  0.5*criterion_cr(y_hat, y, xb)
+        loss_CR =  0.1*criterion_cr(y_hat, y, xb)
 
         loss = loss_recon + loss_Edge + loss_CR
         losses.update(loss.item())
