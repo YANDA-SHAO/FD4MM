@@ -6,53 +6,56 @@ import cv2
 from torchvision.datasets.folder import ImageFolder, default_loader
 
 
-def add_gaussian_noise(image, std=0.1):
+def add_gaussian_noise_01(image01, std=0.03):
     """
-    image: numpy array in [-1, 1]
+    image01: numpy array in [0, 1]
     """
-    noise = np.random.normal(0.0, std, image.shape).astype(np.float32)
-    noisy_image = image + noise
-    return np.clip(noisy_image, -1.0, 1.0)
+    noise = np.random.normal(0.0, std, image01.shape).astype(np.float32)
+    noisy = image01 + noise
+    return np.clip(noisy, 0.0, 1.0)
 
 
-def add_poisson_like_noise(image, lam=0.3):
+def add_poisson_like_noise_01(image01, scale=255.0):
     """
-    image: numpy array in [-1, 1]
-    Keep the original repo's style, but clip at the end.
+    image01: numpy array in [0, 1]
+    A safer poisson-like noise in [0,1] space.
     """
-    n = np.random.normal(0.0, 1.0, image.shape).astype(np.float32)
-    n_str = np.sqrt(image + 1.0) / np.sqrt(127.5)
-    noisy_image = image + lam * n * n_str
-    return np.clip(noisy_image, -1.0, 1.0)
+    image01 = np.clip(image01, 0.0, 1.0).astype(np.float32)
+
+    # Simulate photon counting in a simple and stable way
+    vals = np.clip(image01 * scale, 0.0, scale)
+    noisy = np.random.poisson(vals).astype(np.float32) / scale
+    return np.clip(noisy, 0.0, 1.0)
 
 
 def preprocess_image(sample, preproc=None, resize_to=(384, 384), is_target=False):
     """
     sample: HWC, RGB, uint8/float numpy array
-    preproc: list, e.g. ['resize', 'gaussian'] or ['resize', 'poisson']
+    preproc: list, e.g. ['resize'] or ['resize', 'gaussian']
     is_target: target image (amplified) should usually not receive input noise
     """
     if preproc is None:
         preproc = []
 
-    # Ensure numpy array
     sample = np.asarray(sample)
 
     # Resize first
     if 'resize' in preproc:
         sample = cv2.resize(sample, resize_to, interpolation=cv2.INTER_LANCZOS4)
 
-    # Normalize to [-1, 1]
-    sample = sample.astype(np.float32) / 127.5 - 1.0
+    # Convert to float in [0, 1]
+    sample = sample.astype(np.float32) / 255.0
+    sample = np.clip(sample, 0.0, 1.0)
 
-    # Add noise only to inputs, not to target
+    # Add noise only to inputs, not target
     if not is_target:
         if 'gaussian' in preproc:
-            sample = add_gaussian_noise(sample, std=0.1)
+            sample = add_gaussian_noise_01(sample, std=0.03)
         if 'poisson' in preproc:
-            sample = add_poisson_like_noise(sample, lam=0.3)
+            sample = add_poisson_like_noise_01(sample, scale=255.0)
 
-    # Final safety clip
+    # Map [0,1] -> [-1,1] to keep compatibility with existing network
+    sample = sample * 2.0 - 1.0
     sample = np.clip(sample, -1.0, 1.0)
 
     # HWC -> CHW
@@ -107,7 +110,7 @@ class BaseImageFromFolder(ImageFolder):
         else:
             num_data = min(int(num_data), available)
 
-        # Build samples by numeric filename convention: %06d.png
+        # Keep the original numeric filename convention
         self.samples = [
             (
                 os.path.join(dir_amp, f'{i+1:06d}.png'),
@@ -221,7 +224,7 @@ if __name__ == '__main__':
     dataset = ImageFromFolder(
         './../data/train',
         num_data=100,
-        preprocessing=['resize', 'gaussian']
+        preprocessing=['resize']
     )
 
     imageAmp, imageA, imageB, mag = dataset[0]
