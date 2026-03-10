@@ -62,7 +62,7 @@ class Config(object):
         # =========================================================
         # 2) General training settings
         # =========================================================
-        self.epochs = 100
+        self.epochs = 200
         self.batch_size = 40
         self.workers = 2
 
@@ -73,10 +73,10 @@ class Config(object):
         self.workers_test = self.test_workers
         self.numtestdata = 600
 
-        self.lr = 1e-4
+        self.lr = 1e-3
         self.betas = (0.9, 0.999)
         self.weight_decay = 0.0
-        self.preproc = ['resize', 'gaussian']
+        self.preproc = ['resize', 'poisson']
         self.load_all = False
         self.videos_train = []
 
@@ -86,10 +86,9 @@ class Config(object):
         self.data_dir = '/data/curtin_cumlg/curtin_yanda/work/datasets/'
 
         self.dataset_roots = {
-            'deepmag': os.path.join(self.data_dir, 'train'),
+            'deepmag': os.path.join(self.data_dir, 'deepmag', 'train'),
             'kubric': os.path.join(self.data_dir, 'Kubric_vmm_train'),
         }
-
         if self.dataset_name not in self.dataset_roots:
             raise ValueError(
                 f"Unknown dataset_name: {self.dataset_name}. "
@@ -101,9 +100,9 @@ class Config(object):
         # =========================================================
         # 4) Pretrained weights
         # =========================================================
-        self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM_kubric_ft/magnet_epoch65_loss3.91e-01.pth'
+        self.pretrained_weights = ''
         if self.finetune:
-            self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM_kubric_ft/magnet_epoch65_loss3.91e-01.pth'
+            self.pretrained_weights = ''
             #self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM/magnet_epoch4_loss4.99e-01.pth'
 
         # =========================================================
