@@ -21,8 +21,6 @@ def add_poisson_like_noise_01(image01, scale=255.0):
     A safer poisson-like noise in [0,1] space.
     """
     image01 = np.clip(image01, 0.0, 1.0).astype(np.float32)
-
-    # Simulate photon counting in a simple and stable way
     vals = np.clip(image01 * scale, 0.0, scale)
     noisy = np.random.poisson(vals).astype(np.float32) / scale
     return np.clip(noisy, 0.0, 1.0)
@@ -73,6 +71,22 @@ class BaseImageFromFolder(ImageFolder):
         resize_to=(384, 384),
         loader=default_loader,
     ):
+        """
+        Expected folder structure for root:
+            root/
+              frameA/
+              frameB/
+              frameC/        # optional for current training, but should exist in dataset
+              amplified/
+              meta/          # optional for current training, but should exist in dataset
+              train_mf.txt   # or test_mf.txt if explicitly passed
+
+        Important:
+        - We DO NOT assume filenames must be 000001.png, 000002.png, ...
+        - We build sample pairs from real filenames present in the folders.
+        - The magnification factors in mf_file are assumed to correspond to the
+          sorted valid sample ids.
+        """
         self.root = root
         self.loader = loader
         self.preproc = preprocessing if preprocessing is not None else []
@@ -91,44 +105,98 @@ class BaseImageFromFolder(ImageFolder):
         dir_amp = os.path.join(root, 'amplified')
         dir_A = os.path.join(root, 'frameA')
         dir_B = os.path.join(root, 'frameB')
+        dir_C = os.path.join(root, 'frameC')
+        dir_meta = os.path.join(root, 'meta')
 
         for d in [dir_amp, dir_A, dir_B]:
             if not os.path.isdir(d):
                 raise FileNotFoundError(f'[DataLoader] required folder not found: {d}')
 
-        files_amp = sorted([f for f in os.listdir(dir_amp) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-        files_A = sorted([f for f in os.listdir(dir_A) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
-        files_B = sorted([f for f in os.listdir(dir_B) if f.lower().endswith(('.png', '.jpg', '.jpeg'))])
+        # frameC/meta are not directly used in __getitem__ for now,
+        # but it is safer to check and report if they exist.
+        self.has_frameC = os.path.isdir(dir_C)
+        self.has_meta = os.path.isdir(dir_meta)
 
-        available = min(len(files_amp), len(files_A), len(files_B), len(mag))
+        # Gather actual file stems from folders
+        stems_amp = {
+            os.path.splitext(f)[0]
+            for f in os.listdir(dir_amp)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        }
+        stems_A = {
+            os.path.splitext(f)[0]
+            for f in os.listdir(dir_A)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        }
+        stems_B = {
+            os.path.splitext(f)[0]
+            for f in os.listdir(dir_B)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        }
 
-        if available == 0:
-            raise ValueError(f'[DataLoader] no valid samples found under: {root}')
+        # Use the intersection to guarantee alignment
+        common_stems = sorted(stems_amp & stems_A & stems_B)
+
+        if len(common_stems) == 0:
+            raise ValueError(f'[DataLoader] no valid aligned samples found under: {root}')
+
+        # If frameC exists, optionally enforce consistency with it
+        if self.has_frameC:
+            stems_C = {
+                os.path.splitext(f)[0]
+                for f in os.listdir(dir_C)
+                if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+            }
+            common_stems = sorted(set(common_stems) & stems_C)
+
+        # If meta exists, optionally enforce consistency with it
+        if self.has_meta:
+            stems_meta = {
+                os.path.splitext(f)[0]
+                for f in os.listdir(dir_meta)
+                if f.lower().endswith('.json')
+            }
+            common_stems = sorted(set(common_stems) & stems_meta)
+
+        if len(common_stems) == 0:
+            raise ValueError(f'[DataLoader] aligned sample set became empty after consistency checks: {root}')
+
+        available = min(len(common_stems), len(mag))
 
         if num_data is None:
             num_data = available
         else:
             num_data = min(int(num_data), available)
 
-        # Keep the original numeric filename convention
-        self.samples = [
-            (
-                os.path.join(dir_amp, f'{i+1:06d}.png'),
-                os.path.join(dir_A, f'{i+1:06d}.png'),
-                os.path.join(dir_B, f'{i+1:06d}.png'),
-                mag[i],
-            )
-            for i in range(num_data)
-        ]
+        selected_stems = common_stems[:num_data]
+        selected_mag = mag[:num_data]
+
+        def find_image_path(folder, stem):
+            for ext in ['.png', '.jpg', '.jpeg']:
+                p = os.path.join(folder, stem + ext)
+                if os.path.exists(p):
+                    return p
+            raise FileNotFoundError(f'[DataLoader] file not found for stem={stem} in folder={folder}')
+
+        self.sample_ids = selected_stems
+        self.samples = []
+        for stem, m in zip(selected_stems, selected_mag):
+            pathAmp = find_image_path(dir_amp, stem)
+            pathA = find_image_path(dir_A, stem)
+            pathB = find_image_path(dir_B, stem)
+            self.samples.append((pathAmp, pathA, pathB, float(m), stem))
+
         self.imgs = self.samples
 
         print(f'[DataLoader] root={root}')
         print(f'[DataLoader] mf_file={mf_file}')
-        print(f'[DataLoader] available={available}, using={num_data}')
+        print(f'[DataLoader] available_aligned={available}, using={num_data}')
         print(f'[DataLoader] preprocessing={self.preproc}, resize_to={self.resize_to}')
+        if len(self.sample_ids) > 0:
+            print(f'[DataLoader] first_id={self.sample_ids[0]}, last_id={self.sample_ids[-1]}')
 
     def __getitem__(self, index):
-        pathAmp, pathA, pathB, target = self.samples[index]
+        pathAmp, pathA, pathB, target, sample_id = self.samples[index]
 
         sampleAmp = np.array(self.loader(pathAmp))
         sampleA = np.array(self.loader(pathA))
@@ -154,6 +222,9 @@ class BaseImageFromFolder(ImageFolder):
         )
 
         target = torch.tensor(target, dtype=torch.float32)
+
+        # Keep return format unchanged for compatibility:
+        # y, xa, xb, mag_factor
         return sampleAmp, sampleA, sampleB, target
 
     def __len__(self):
@@ -161,6 +232,26 @@ class BaseImageFromFolder(ImageFolder):
 
 
 class ImageFromFolder(BaseImageFromFolder):
+    def __init__(
+        self,
+        root,
+        num_data=None,
+        preprocessing=None,
+        transform=None,
+        target_transform=None,
+        loader=default_loader
+    ):
+        super().__init__(
+            root=root,
+            mf_file='train_mf.txt',
+            num_data=num_data,
+            preprocessing=preprocessing,
+            resize_to=(384, 384),
+            loader=loader,
+        )
+
+
+class ImageFromFolderVal(BaseImageFromFolder):
     def __init__(
         self,
         root,
@@ -192,27 +283,7 @@ class ImageFromFolderTest(BaseImageFromFolder):
     ):
         super().__init__(
             root=root,
-            mf_file='test_mf.txt',
-            num_data=num_data,
-            preprocessing=preprocessing,
-            resize_to=(384, 384),
-            loader=loader,
-        )
-
-
-class ImageFromFolderVal(BaseImageFromFolder):
-    def __init__(
-        self,
-        root,
-        num_data=None,
-        preprocessing=None,
-        transform=None,
-        target_transform=None,
-        loader=default_loader
-    ):
-        super().__init__(
-            root=root,
-            mf_file='test_mf.txt',
+            mf_file='train_mf.txt',
             num_data=num_data,
             preprocessing=preprocessing,
             resize_to=(384, 384),
@@ -226,9 +297,8 @@ if __name__ == '__main__':
         num_data=100,
         preprocessing=['resize']
     )
-
     imageAmp, imageA, imageB, mag = dataset[0]
     print('imageAmp:', imageAmp.shape)
-    print('imageA  :', imageA.shape)
-    print('imageB  :', imageB.shape)
-    print('mag     :', mag)
+    print('imageA :', imageA.shape)
+    print('imageB :', imageB.shape)
+    print('mag :', mag)
