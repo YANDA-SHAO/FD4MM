@@ -14,8 +14,8 @@ from callbacks import gen_state_dict
 AMP = 20
 TESTSET = "baby"
 
-WEIGHTS_OLD = "weights_dateFD4MM_kubric_ft/magnet_epoch1_loss8.17e-01.pth"
-WEIGHTS_NEW = "weights_dateFD4MM_kubric_ft/magnet_epoch0_loss3.46e-01.pth"
+WEIGHTS_OLD = "weights_dateFD4MM_kubric_ft/magnet_epoch1_loss2.86e-01.pth"
+WEIGHTS_NEW = "weights_dateFD4MM_kubric_ft/magnet_epoch17_loss2.70e-01.pth"
 
 OUT_VIDEO = f"compare_{TESTSET}_orig_old_new_amp{AMP}.mp4"
 FPS = 30
