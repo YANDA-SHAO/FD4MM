@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import torch.backends.cudnn as cudnn
+from torch.utils.data import Subset
 
 import wandb
 from tensorboardX import SummaryWriter
@@ -92,12 +93,6 @@ def main():
     magnet = MagNet()
     start_epoch = 0
 
-    if config.pretrained_weights:
-        print(f"=> loading checkpoint '{config.pretrained_weights}'")
-        magnet.load_state_dict(gen_state_dict(config.pretrained_weights))
-    else:
-        print("=> training from scratch")
-
     if torch.cuda.device_count() > 1:
         print(f"[Device] DataParallel with {torch.cuda.device_count()} GPUs")
         magnet = nn.DataParallel(magnet)
@@ -131,6 +126,52 @@ def main():
     print('[Path] Test dir :', config.dir_test)
 
     # =========================================================
+    # Resume or load pretrained
+    # =========================================================
+    train_losses, train_losses_recon, train_losses_edge, train_losses_cr = [], [], [], []
+    global_step = 0
+
+    best_val_loss = float('inf')
+    best_val_psnr = -float('inf')
+    best_val_ssim = -float('inf')
+    best_epoch = -1
+
+    latest_ckpt_path = os.path.join(config.save_dir, 'latest.pth')
+
+    if os.path.isfile(latest_ckpt_path):
+        print(f"=> resuming from checkpoint '{latest_ckpt_path}'")
+        checkpoint = torch.load(latest_ckpt_path, map_location=device)
+
+        model_to_load = magnet.module if isinstance(magnet, nn.DataParallel) else magnet
+        model_to_load.load_state_dict(checkpoint['model_state_dict'])
+
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+        start_epoch = checkpoint.get('epoch', -1) + 1
+        global_step = checkpoint.get('global_step', 0)
+
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        best_val_psnr = checkpoint.get('best_val_psnr', -float('inf'))
+        best_val_ssim = checkpoint.get('best_val_ssim', -float('inf'))
+        best_epoch = checkpoint.get('best_epoch', -1)
+
+        train_losses = checkpoint.get('train_losses', [])
+        train_losses_recon = checkpoint.get('train_losses_recon', [])
+        train_losses_edge = checkpoint.get('train_losses_edge', [])
+        train_losses_cr = checkpoint.get('train_losses_cr', [])
+
+        print(f"=> resumed from epoch {start_epoch}, global_step {global_step}")
+        print(f"=> best_val_loss={best_val_loss:.6f}, best_val_psnr={best_val_psnr:.4f}, best_val_ssim={best_val_ssim:.6f}")
+
+    elif config.pretrained_weights:
+        print(f"=> loading checkpoint '{config.pretrained_weights}'")
+        model_to_load = magnet.module if isinstance(magnet, nn.DataParallel) else magnet
+        model_to_load.load_state_dict(gen_state_dict(config.pretrained_weights))
+    else:
+        print("=> training from scratch")
+
+    # =========================================================
     # Data loaders
     # =========================================================
     dataset_train = ImageFromFolder(
@@ -149,7 +190,7 @@ def main():
 
     dataset_val = ImageFromFolderVal(
         config.dir_val,
-        num_data=config.val_subset,
+        num_data=None,
         preprocessing=['resize']  # val/test should not add train noise
     )
     val_loader = data.DataLoader(
@@ -170,14 +211,6 @@ def main():
     print('Network parameters {}'.format(sum(p.numel() for p in magnet.parameters())))
     print('Trainable network parameters {}'.format(sum(p.numel() for p in magnet.parameters() if p.requires_grad)))
 
-    train_losses, train_losses_recon, train_losses_edge, train_losses_cr = [], [], [], []
-    global_step = 0
-
-    best_val_loss = float('inf')
-    best_val_psnr = -float('inf')
-    best_val_ssim = -float('inf')
-    best_epoch = -1
-
     # =========================================================
     # Training loop
     # =========================================================
@@ -186,7 +219,7 @@ def main():
         best_val_loss, best_val_psnr, best_val_ssim, best_epoch = train(
             train_loader, magnet, criterion_char, criterion_edge, criterion_cr,
             optimizer, epoch, device, config, val_loader, global_step,
-            best_val_loss, best_val_psnr, best_val_ssim, best_epoch
+            best_val_loss, best_val_psnr, best_val_ssim, best_epoch, scheduler
         )
 
         current_lr = optimizer.param_groups[0]['lr']
@@ -221,7 +254,22 @@ def main():
         # -----------------------------
         state_dict_to_save = magnet.module.state_dict() if isinstance(magnet, nn.DataParallel) else magnet.state_dict()
 
-        save_checkpoint(state_dict_to_save, config.save_dir, 'latest.pth')
+        latest_state = {
+            'epoch': epoch,
+            'global_step': global_step,
+            'model_state_dict': state_dict_to_save,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_val_loss': best_val_loss,
+            'best_val_psnr': best_val_psnr,
+            'best_val_ssim': best_val_ssim,
+            'best_epoch': best_epoch,
+            'train_losses': train_losses,
+            'train_losses_recon': train_losses_recon,
+            'train_losses_edge': train_losses_edge,
+            'train_losses_cr': train_losses_cr,
+        }
+        save_checkpoint(latest_state, config.save_dir, 'latest.pth')
 
         if (epoch + 1) % config.save_every_epoch == 0:
             # keep original callback behaviour too
@@ -236,7 +284,7 @@ def main():
     wandb.finish()
 
 
-def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer, epoch, device, config, val_loader, global_step, best_val_loss, best_val_psnr, best_val_ssim, best_epoch):
+def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer, epoch, device, config, val_loader, global_step, best_val_loss, best_val_psnr, best_val_ssim, best_epoch, scheduler):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -250,7 +298,7 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
     print_freq = max(1, len(loader) // config.num_print_per_epoch)
 
     for i, (y, xa, xb, mag_factor) in enumerate(loader):
-        
+
         y = y.to(device, non_blocking=True)
         xa = xa.to(device, non_blocking=True)
         xb = xb.to(device, non_blocking=True)
@@ -283,25 +331,45 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
 
             print(f"\n[VAL Trigger] step={global_step}")
 
+            if config.val_subset is not None and config.val_subset < len(val_loader.dataset):
+                rand_idx = np.random.choice(len(val_loader.dataset), config.val_subset, replace=False)
+                val_subset_dataset = Subset(val_loader.dataset, rand_idx.tolist())
+                current_val_loader = data.DataLoader(
+                    val_subset_dataset,
+                    batch_size=val_loader.batch_size,
+                    shuffle=False,
+                    num_workers=config.test_workers,
+                    pin_memory=True,
+                    drop_last=False,
+                )
+            else:
+                current_val_loader = val_loader
+
             val_loss, val_loss_recon, val_loss_edge, val_loss_cr, val_psnr, val_ssim = validate(
-                val_loader, model, criterion_char, criterion_edge, criterion_cr,
+                current_val_loader, model, criterion_char, criterion_edge, criterion_cr,
                 epoch, device, config
             )
 
             print(
                 f'[VAL] step={global_step} '
                 f'loss={val_loss:.6f} '
+                f'loss_recon={val_loss_recon:.6f} '
+                f'loss_edge={val_loss_edge:.6f} '
+                f'loss_cr={val_loss_cr:.6f} '
                 f'psnr={val_psnr:.4f} '
                 f'ssim={val_ssim:.6f}'
             )
 
             wandb.log({
                 "val/loss": val_loss,
+                "val/loss_recon": val_loss_recon,
+                "val/loss_edge": val_loss_edge,
+                "val/loss_CR": val_loss_cr,
                 "val/psnr": val_psnr,
                 "val/ssim": val_ssim,
                 "step": global_step
             })
-            
+
             # save best checkpoint based on step-based validation
             is_best = False
             if config.save_best_by == 'loss':
@@ -321,7 +389,18 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
 
             if is_best:
                 state_dict_to_save = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-                save_checkpoint(state_dict_to_save, config.save_dir, 'best_psnr.pth')
+                best_state = {
+                    'epoch': epoch,
+                    'global_step': global_step,
+                    'model_state_dict': state_dict_to_save,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'best_val_psnr': best_val_psnr,
+                    'best_val_ssim': best_val_ssim,
+                    'best_epoch': best_epoch,
+                }
+                save_checkpoint(best_state, config.save_dir, 'best_psnr.pth')
                 print(
                     f'[Best] Updated at step={global_step}, epoch={epoch}, '
                     f'val_psnr={best_val_psnr:.4f}, '
@@ -370,6 +449,7 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
         best_val_ssim,
         best_epoch
     )
+
 
 @torch.no_grad()
 def validate(loader, model, criterion_char, criterion_edge, criterion_cr, epoch, device, config):
