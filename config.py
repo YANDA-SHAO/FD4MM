@@ -1,25 +1,25 @@
 # =========================================================
 # Usage notes
 # =========================================================
-# 1) Train on original DeepMag dataset from scratch:
-#    self.dataset_name = 'deepmag'
-#    self.finetune = False
-#    self.max_samples = None
+# 1) DeepMag only:
+#    self.exp_name = 'deepmag_only'
 #
-# 2) Finetune on Kubric dataset:
-#    self.dataset_name = 'kubric'
-#    self.finetune = True
-#    self.max_samples = None
+# 2) Kubric only:
+#    self.exp_name = 'kubric_only'
 #
-# 3) Quick debug with a small subset:
+# 3) Pretrain on DeepMag, finetune on Kubric:
+#    self.exp_name = 'deepmag_to_kubric'
+#    self.pretrained_weights = 'path_to_deepmag_best.pth'   # used only in finetune stage
+#
+# 4) Quick debug:
 #    self.max_samples = 200
 #
 # Notes:
-# - max_samples=None means using all samples listed in train_mf.txt
-# - sample count is inferred automatically from train_mf.txt
-# - save_dir is generated automatically based on dataset_name and finetune
+# - max_samples=None means using all samples in the selected split
+# - Each split folder must contain:
+#     frameA/, frameB/, frameC/, amplified/, meta/, train_mf.txt
+# - save_dir is generated automatically from exp_name and hp_tag
 # =========================================================
-
 
 import os
 import time
@@ -36,77 +36,128 @@ from cmath import sqrt
 
 class Config(object):
     def __init__(self):
-        
+
         # -----------------------------
         # W&B
         # -----------------------------
         self.wandb_project = 'Magnification'
-        self.wandb_entity = 'yandashao'          # 你的 team / username，没有就 None
-        self.wandb_mode = 'online'        # 'online', 'offline', 'disabled'
-        
-        
-        # =========================================================
-        # 1) High-level switches: only change these in daily use
-        # =========================================================
-        # options: 'deepmag', 'kubric'
-        self.dataset_name = 'kubric'
+        self.wandb_entity = 'yandashao'
+        self.wandb_mode = 'online'   # 'online', 'offline', 'disabled'
 
-        # False: train from scratch on selected dataset
-        # True : load pretrained weights and finetune on selected dataset
-        self.finetune = True
+        # =========================================================
+        # 1) Experiment mode
+        # =========================================================
+        # options:
+        #   'deepmag_only'
+        #   'kubric_only'
+        #   'deepmag_to_kubric'
+        self.exp_name = 'deepmag_only'
+
+        # Optional run tag for manual hyperparameter search / ablation naming
+        # e.g. 'bs8_lr1e-4', 'ft_lr5e-5', 'debug200'
+        self.hp_tag = 'exp1_deepmag_only'
 
         # Optional: limit sample count for quick debugging
-        # None means use all samples found in train_mf.txt
+        # None means use all samples found in the selected split's train_mf.txt
         self.max_samples = None
 
         # =========================================================
         # 2) General training settings
         # =========================================================
-        self.epochs = 200
-        self.batch_size = 40
+        self.epochs = 10
+        self.batch_size = 32
         self.workers = 2
 
         self.test_batch_size = 1
         self.batch_size_test = self.test_batch_size
 
-        self.test_workers = 4
+        self.test_workers = 2
         self.workers_test = self.test_workers
+
         self.numtestdata = 600
 
         self.lr = 1e-3
         self.betas = (0.9, 0.999)
         self.weight_decay = 0.0
+
         self.preproc = ['resize', 'poisson']
         self.load_all = False
         self.videos_train = []
 
         # =========================================================
-        # 3) Data roots
+        # 3) Validation / checkpoint behaviour
+        # =========================================================
+        # Validation is run every eval_every_epoch epochs
+        self.eval_every_iter = 1000   # 大概10分钟一次，需要根据速度调整
+        self.eval_every_epoch = None  # 不再按epoch
+        self.val_subset = 200
+
+        # Save one checkpoint every save_every_epoch epochs
+        self.save_every_epoch = 1
+
+        # Which metric decides best checkpoint:
+        # options: 'psnr', 'loss'
+        self.save_best_by = 'psnr'
+
+        # Print train log every N iterations
+        self.num_print_per_epoch = 10
+
+        # =========================================================
+        # 4) Data roots
         # =========================================================
         self.data_dir = '/data/curtin_cumlg/curtin_yanda/work/datasets/'
 
+        # Root folders now point to dataset root, NOT directly to train/
         self.dataset_roots = {
-            'deepmag': os.path.join(self.data_dir, 'deepmag', 'train'),
-            'kubric': os.path.join(self.data_dir, 'Kubric_vmm_train'),
+            'deepmag': os.path.join(self.data_dir, 'deepmag'),
+            'kubric': os.path.join(self.data_dir, 'Kubric_vmm'),
         }
+
+        # =========================================================
+        # 5) Experiment-specific dataset / finetune settings
+        # =========================================================
+        self.dataset_name = None
+        self.finetune = False
+        self.pretrained_weights = ''
+
+        if self.exp_name == 'deepmag_only':
+            self.dataset_name = 'deepmag'
+            self.finetune = False
+            self.pretrained_weights = ''
+
+        elif self.exp_name == 'kubric_only':
+            self.dataset_name = 'kubric'
+            self.finetune = False
+            self.pretrained_weights = ''
+
+        elif self.exp_name == 'deepmag_to_kubric':
+            self.dataset_name = 'kubric'
+            self.finetune = True
+            # IMPORTANT:
+            # set this path manually before finetuning
+            # Example:
+            # self.pretrained_weights = '/data/.../weights_FD4MM_deepmag_default/best_psnr.pth'
+            self.pretrained_weights = ''
+
+        else:
+            raise ValueError(
+                f"Unknown exp_name: {self.exp_name}. "
+                f"Supported: ['deepmag_only', 'kubric_only', 'deepmag_to_kubric']"
+            )
+
         if self.dataset_name not in self.dataset_roots:
             raise ValueError(
                 f"Unknown dataset_name: {self.dataset_name}. "
                 f"Supported: {list(self.dataset_roots.keys())}"
             )
 
-        self.dir_train = self.dataset_roots[self.dataset_name]
+        self.dataset_root = self.dataset_roots[self.dataset_name]
+        self.dir_train = os.path.join(self.dataset_root, 'train')
+        self.dir_val = os.path.join(self.dataset_root, 'val')
+        self.dir_test = os.path.join(self.dataset_root, 'test')
 
         # =========================================================
-        # 4) Pretrained weights
-        # =========================================================
-        self.pretrained_weights = ''
-        if self.finetune:
-            self.pretrained_weights = ''
-            #self.pretrained_weights = '/data/curtin_cumlg/curtin_yanda/work/FD4MM/weights_dateFD4MM/magnet_epoch4_loss4.99e-01.pth'
-
-        # =========================================================
-        # 5) Auto-discover training metadata from train_mf.txt
+        # 6) Auto-discover training metadata from train_mf.txt
         # =========================================================
         self.mf_path = os.path.join(self.dir_train, 'train_mf.txt')
         if not os.path.exists(self.mf_path):
@@ -126,27 +177,32 @@ class Config(object):
         self.cursor_end = self.numdata
 
         # =========================================================
-        # 6) Save / logging names
+        # 7) Save / logging names
         # =========================================================
-        if self.finetune:
-            self.date = f'FD4MM_{self.dataset_name}_ft'
+        # Keep naming readable and stable
+        if self.exp_name == 'deepmag_only':
+            self.date = 'FD4MM_deepmag'
+        elif self.exp_name == 'kubric_only':
+            self.date = 'FD4MM_kubric'
+        elif self.exp_name == 'deepmag_to_kubric':
+            self.date = 'FD4MM_deepmag2kubric_ft'
         else:
-            self.date = f'FD4MM_{self.dataset_name}'
+            self.date = 'FD4MM_unknown'
 
-        self.save_dir = f'weights_date{self.date}'
+        self.save_dir = f'weights_{self.date}_{self.hp_tag}'
         self.wandb_run_name = self.save_dir
         self.time_st = time.time()
         self.losses = []
 
-        self.num_val_per_epoch = 1000
+        # =========================================================
+        # 8) Dataset sanity checks
+        # =========================================================
+        self._check_split_dataset(self.dir_train, split_name='train', expected_num=self.numdata)
+        self._check_split_dataset(self.dir_val, split_name='val', expected_num=None)
+        self._check_split_dataset(self.dir_test, split_name='test', expected_num=None)
 
         # =========================================================
-        # 7) Dataset sanity check
-        # =========================================================
-        self._check_train_dataset()
-
-        # =========================================================
-        # 8) Keep your original evaluation/test paths
+        # 9) Keep your original evaluation/test paths
         # =========================================================
         # amp test
         self.dir_amp0 = os.path.join(self.data_dir, 'systest/amp0/000000')
@@ -273,39 +329,73 @@ class Config(object):
         self.dir_baby = os.path.join(self.data_dir, 'train/train_vid_frames/val_baby')
         self.dir_crane_crop = os.path.join(self.data_dir, 'train/train_vid_frames/val_crane_crop')
 
-    def _check_train_dataset(self):
-        required_dirs = ['frameA', 'frameB', 'amplified']
+    def _count_files(self, folder, suffixes):
+        return len([
+            x for x in os.listdir(folder)
+            if x.lower().endswith(suffixes)
+        ])
+
+    def _check_split_dataset(self, split_dir, split_name='train', expected_num=None):
+        required_dirs = ['frameA', 'frameB', 'frameC', 'amplified', 'meta']
         counts = {}
 
         for d in required_dirs:
-            p = os.path.join(self.dir_train, d)
+            p = os.path.join(split_dir, d)
             if not os.path.isdir(p):
                 raise FileNotFoundError(f'Required folder not found: {p}')
-            counts[d] = len([x for x in os.listdir(p) if x.lower().endswith(('.png', '.jpg', '.jpeg'))])
 
-        n_mf = len(self.coco_amp_lst)
+            if d == 'meta':
+                counts[d] = self._count_files(p, ('.json',))
+            else:
+                counts[d] = self._count_files(p, ('.png', '.jpg', '.jpeg'))
 
-        print(f'[Config] dataset_name: {self.dataset_name}')
-        print(f'[Config] dir_train: {self.dir_train}')
-        print(f'[Config] frameA: {counts["frameA"]}, frameB: {counts["frameB"]}, amplified: {counts["amplified"]}, mf: {n_mf}')
+        mf_path = os.path.join(split_dir, 'train_mf.txt')
+        if not os.path.exists(mf_path):
+            raise FileNotFoundError(f'train_mf.txt not found: {mf_path}')
 
-        if not (counts['frameA'] == counts['frameB'] == counts['amplified'] == n_mf):
+        split_mf = np.loadtxt(mf_path)
+        if np.ndim(split_mf) == 0:
+            split_mf = np.array([float(split_mf)])
+        n_mf = len(split_mf)
+
+        print(f'[Config] split={split_name} | dir={split_dir}')
+        print(
+            f'[Config] frameA={counts["frameA"]}, '
+            f'frameB={counts["frameB"]}, '
+            f'frameC={counts["frameC"]}, '
+            f'amplified={counts["amplified"]}, '
+            f'meta={counts["meta"]}, '
+            f'mf={n_mf}'
+        )
+
+        all_equal = (
+            counts['frameA'] == counts['frameB'] ==
+            counts['frameC'] == counts['amplified'] ==
+            counts['meta'] == n_mf
+        )
+
+        if not all_equal:
             raise ValueError(
-                'Dataset size mismatch: '
+                f'Dataset size mismatch in split={split_name}: '
                 f'frameA={counts["frameA"]}, '
                 f'frameB={counts["frameB"]}, '
+                f'frameC={counts["frameC"]}, '
                 f'amplified={counts["amplified"]}, '
+                f'meta={counts["meta"]}, '
                 f'train_mf={n_mf}'
             )
 
+        if expected_num is not None and n_mf != expected_num:
+            raise ValueError(
+                f'Expected {expected_num} samples in split={split_name}, '
+                f'but found {n_mf}'
+            )
 
 
 # def mse(imageA, imageB):
-#     # the 'Mean Squared Error' between the two images is the sum of the squared difference between the two images
 #     mse_error = np.sum((imageA.astype("float") - imageB.astype("float")) ** 2)
 #     mse_error /= float(imageA.shape[0] * imageA.shape[1] * 255 )
 #     mse_error /= (np.mean((imageA.astype("float"))))**2
-#     # return the MSE. The lower the error, the more "similar" the two images are.
 #     return mse_error
 
 # def mae(imageA, imageB):
@@ -337,40 +427,36 @@ def calc_rmse(img1, img2):
     rmse_score = sqrt(mse_score)
     return rmse_score
 
-def calc_psnr(img1, img2): #这里输入的是（0,255）的灰度或彩色图像，如果是彩色图像，则numpy.mean相当于对三个通道计算的结果再求均值
+def calc_psnr(img1, img2):
     mse = np.mean((img1 / 255. - img2 / 255.) ** 2)
-    if mse < 1.0e-10: # 如果两图片差距过小代表完美重合
+    if mse < 1.0e-10:
         return 100
     PIXEL_MAX = 1.0
-    return 20 * math.log10(PIXEL_MAX / math.sqrt(mse)) # 将对数中pixel_max的平方放了下来
+    return 20 * math.log10(PIXEL_MAX / math.sqrt(mse))
 
-
-# def calc_psnr(img1, img2):
-
-#     # img1 = Image.open(img1_path)
-#     # img2 = Image.open(img2_path)
-#     # img2 = img2.resize(img1.size)
-#     # img1, img2 = np.array(img1), np.array(img2)
-#     # 此处的第一张图片为真实图像，第二张图片为测试图片
-#     # 此处因为图像范围是0-255，所以data_range为255，如果转化为浮点数，且是0-1的范围，则data_range应为1
-#     psnr_score = psnr(img1, img2, data_range=255)
-#     return psnr_score
 
 def calc_ssim(img1, img2):
+    """
+    img1, img2: HWC uint8 RGB image in [0,255]
+    Compatible with both old and new skimage APIs.
+    """
+    try:
+        return ssim(
+            img1,
+            img2,
+            data_range=255,
+            channel_axis=-1
+        )
+    except TypeError:
+        return ssim(
+            img1,
+            img2,
+            data_range=255,
+            multichannel=True
+        )
 
-    # img1 = Image.open(img1_path).convert('L')
-    # img2 = Image.open(img2_path).convert('L')
-    # img2 = img2.resize(img1.size)
-    # img1, img2 = np.array(img1), np.array(img2)
-    # 此处因为转换为灰度值之后的图像范围是0-255，所以data_range为255，如果转化为浮点数，且是0-1的范围，则data_range应为1
-    ssim_score = ssim(img1, img2, data_range=255 , multichannel=True)
-    return ssim_score
 
-
-import json
-
-""" configuration json """
-class Configjson(dict): 
+class Configjson(dict):
     __getattr__ = dict.__getitem__
     __setattr__ = dict.__setitem__
 
