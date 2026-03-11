@@ -19,6 +19,7 @@ def add_poisson_like_noise_01(image01, scale=255.0):
     """
     image01: numpy array in [0, 1]
     A safer poisson-like noise in [0,1] space.
+    Kept here intentionally, but not used now.
     """
     image01 = np.clip(image01, 0.0, 1.0).astype(np.float32)
     vals = np.clip(image01 * scale, 0.0, scale)
@@ -30,14 +31,14 @@ def preprocess_image(sample, preproc=None, resize_to=(384, 384), is_target=False
     """
     sample: HWC, RGB, uint8/float numpy array
     preproc: list, e.g. ['resize'] or ['resize', 'gaussian']
-    is_target: target image (amplified) should usually not receive input noise
+    is_target: target image (amplified) should not receive noise
     """
     if preproc is None:
         preproc = []
 
     sample = np.asarray(sample)
 
-    # Resize first
+    # 保留 resize
     if 'resize' in preproc:
         sample = cv2.resize(sample, resize_to, interpolation=cv2.INTER_LANCZOS4)
 
@@ -45,14 +46,20 @@ def preprocess_image(sample, preproc=None, resize_to=(384, 384), is_target=False
     sample = sample.astype(np.float32) / 255.0
     sample = np.clip(sample, 0.0, 1.0)
 
-    # Add noise only to inputs, not target
+    # =========================
+    # Only change noise part:
+    # - keep gaussian if requested
+    # - do NOT apply poisson now
+    # - do NOT add noise to target
+    # =========================
     if not is_target:
         if 'gaussian' in preproc:
             sample = add_gaussian_noise_01(sample, std=0.03)
-        if 'poisson' in preproc:
-            sample = add_poisson_like_noise_01(sample, scale=255.0)
+        # keep poisson function but do not use it
+        # if 'poisson' in preproc:
+        #     sample = add_poisson_like_noise_01(sample, scale=255.0)
 
-    # Map [0,1] -> [-1,1] to keep compatibility with existing network
+    # Map [0,1] -> [-1,1]
     sample = sample * 2.0 - 1.0
     sample = np.clip(sample, -1.0, 1.0)
 
