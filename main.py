@@ -250,9 +250,6 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
     print_freq = max(1, len(loader) // config.num_print_per_epoch)
 
     for i, (y, xa, xb, mag_factor) in enumerate(loader):
-        if i > 50:   # 只跑50个iteration
-            print("DEBUG STOP: iteration test finished")
-        break
         
         y = y.to(device, non_blocking=True)
         xa = xa.to(device, non_blocking=True)
@@ -267,7 +264,7 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
 
         loss_recon = criterion_char(y_hat, y)
         loss_edge = criterion_edge(y_hat, y)
-        loss_cr = 0.1 * criterion_cr(y_hat, y, xb)
+        loss_cr = 0.5 * criterion_cr(y_hat, y, xb)
 
         loss = loss_recon + loss_edge + loss_cr
 
@@ -281,8 +278,8 @@ def train(loader, model, criterion_char, criterion_edge, criterion_cr, optimizer
         optimizer.step()
         global_step += 1
 
-        # 每2000 iteration 做一次 validation
-        if global_step % 20 == 0:
+        # 每1000 iteration 做一次 validation
+        if global_step % 1000 == 0:
 
             print(f"\n[VAL Trigger] step={global_step}")
 
@@ -399,7 +396,7 @@ def validate(loader, model, criterion_char, criterion_edge, criterion_cr, epoch,
 
         loss_recon = criterion_char(y_hat, y)
         loss_edge = criterion_edge(y_hat, y)
-        loss_cr = 0.1 * criterion_cr(y_hat, y, xb)
+        loss_cr = 0.5 * criterion_cr(y_hat, y, xb)
         loss = loss_recon + loss_edge + loss_cr
 
         losses.update(loss.item(), y.size(0))

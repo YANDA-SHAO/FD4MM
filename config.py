@@ -64,11 +64,11 @@ class Config(object):
         # =========================================================
         # 2) General training settings
         # =========================================================
-        self.epochs = 10
+        self.epochs = 100
         self.batch_size = 32
         self.workers = 2
 
-        self.test_batch_size = 1
+        self.test_batch_size = 4
         self.batch_size_test = self.test_batch_size
 
         self.test_workers = 2
@@ -76,11 +76,11 @@ class Config(object):
 
         self.numtestdata = 600
 
-        self.lr = 1e-3
+        self.lr = 1e-4
         self.betas = (0.9, 0.999)
         self.weight_decay = 0.0
 
-        self.preproc = ['resize', 'poisson']
+        self.preproc = ['resize', 'gaussian']
         self.load_all = False
         self.videos_train = []
 
